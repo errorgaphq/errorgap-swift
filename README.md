@@ -16,7 +16,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://gitlab.jgrubbs.net/jGRUBBS/errorgap-swift.git", from: "0.1.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.1.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
