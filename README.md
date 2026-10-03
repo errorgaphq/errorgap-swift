@@ -17,7 +17,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.2.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.3.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
@@ -125,6 +125,28 @@ try Errorgap.trackJob("ReceiptJob", queue: "critical") { spans in
     try runReceiptJob()
 }
 ```
+
+### Link errors to their transaction
+
+Every `ErrorgapTransaction` has an `id`. Errors reported inside
+`withErrorgapTransaction(id) { ... }` — and a failing `trackJob` — carry it as
+`context.transaction_id`, so errorgap shows the error an interaction raised on
+its trace:
+
+```swift
+let transaction = ErrorgapTransaction(path: "/checkout", durationMs: 0)
+let started = Date()
+await withErrorgapTransaction(transaction.id) {
+    await submitOrder()   // errors reported here carry transaction.id
+}
+Errorgap.notifyTransaction(ErrorgapTransaction(
+    id: transaction.id, path: "/checkout",
+    durationMs: Date().timeIntervalSince(started) * 1_000
+))
+```
+
+The id is a `@TaskLocal`: it flows into child tasks and never leaks into a
+concurrent one.
 
 ## Logs
 

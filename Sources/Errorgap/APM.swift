@@ -67,6 +67,8 @@ public struct ErrorgapSpan {
 }
 
 public struct ErrorgapTransaction {
+    /// Links errors raised during this transaction to it; see `withErrorgapTransaction`.
+    public let id: String
     public let kind: String
     public let method: String?
     public let path: String?
@@ -80,6 +82,7 @@ public struct ErrorgapTransaction {
     public let queue: String?
 
     public init(
+        id: String = UUID().uuidString.lowercased(),
         kind: String = "web",
         method: String? = nil,
         path: String? = nil,
@@ -92,6 +95,7 @@ public struct ErrorgapTransaction {
         jobClass: String? = nil,
         queue: String? = nil
     ) {
+        self.id = id
         self.kind = kind
         self.method = method
         self.path = path
@@ -107,6 +111,7 @@ public struct ErrorgapTransaction {
 
     func payload(configuration: ErrorgapConfiguration) -> [String: Any] {
         var value: [String: Any] = [
+            "id": id,
             "kind": kind,
             "duration_ms": durationMs,
             "environment": environment ?? configuration.environment,

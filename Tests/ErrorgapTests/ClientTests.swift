@@ -117,4 +117,54 @@ struct ClientTests {
         #expect(paths.contains("/api/projects/demo/notices"))
         #expect(paths.contains("/api/projects/demo/transactions"))
     }
+
+    // Errors reported inside a transaction carry its id, so errorgap shows the
+    // error an interaction raised on its trace and links the two.
+    @Test func errorsInsideATransactionCarryItsId() async {
+        let session = FakeIngestor.makeSession()
+        let client = ErrorgapClient(ErrorgapConfiguration(
+            endpoint: "https://errorgap.example.com",
+            projectSlug: "demo",
+            async: false,
+            apmEnabled: true
+        ), session: session)
+        let transaction = ErrorgapTransaction(path: "/checkout", durationMs: 12)
+        await withErrorgapTransaction(transaction.id) {
+            await Task.yield()
+            client.notify(NSError(domain: "checkout", code: 1, userInfo: [NSLocalizedDescriptionKey: "declined"]))
+        }
+        client.notify(NSError(domain: "checkout", code: 2))
+        client.notifyTransaction(transaction)
+
+        let requests = FakeIngestorProtocol.requests
+        let inside = requests[0].body?["context"] as? [String: Any]
+        let outside = requests[1].body?["context"] as? [String: Any]
+        #expect(inside?["transaction_id"] as? String == transaction.id)
+        #expect(outside?["transaction_id"] == nil)
+        #expect(requests[2].body?["id"] as? String == transaction.id)
+        #expect(transaction.id.count == 36)
+        #expect(ErrorgapTransactionContext.current == nil)
+    }
+
+    @Test func aFailedJobsErrorCarriesTheJobsId() {
+        let session = FakeIngestor.makeSession()
+        let client = ErrorgapClient(ErrorgapConfiguration(
+            endpoint: "https://errorgap.example.com",
+            projectSlug: "demo",
+            async: false,
+            apmEnabled: true
+        ), session: session)
+        var seen: String?
+        _ = try? client.trackJob("ReceiptJob") { _ -> Int in
+            seen = ErrorgapTransactionContext.current
+            throw NSError(domain: "mail", code: 1)
+        }
+
+        let requests = FakeIngestorProtocol.requests
+        let notice = requests.first { $0.url?.path.hasSuffix("/notices") == true }
+        let transaction = requests.first { $0.url?.path.hasSuffix("/transactions") == true }
+        #expect(seen != nil)
+        #expect((notice?.body?["context"] as? [String: Any])?["transaction_id"] as? String == seen)
+        #expect(transaction?.body?["id"] as? String == seen)
+    }
 }

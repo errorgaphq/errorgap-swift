@@ -43,7 +43,7 @@ public final class ErrorgapClient {
             return DeliveryResult(status: nil, body: nil, error: error, queued: false)
         }
 
-        let notice = Notice.build(error: error, config: configuration, options: options)
+        let notice = Notice.build(error: error, config: configuration, options: withTransaction(options))
         return submit(resource: "notices", payload: notice, sync: sync)
     }
 
@@ -104,12 +104,14 @@ public final class ErrorgapClient {
         queue: String = "default",
         operation: (ErrorgapSpanCollector) throws -> T
     ) rethrows -> T {
+        let transactionId = UUID().uuidString.lowercased()
         let startedAt = errorgapTimestamp()
         let started = Date()
         let collector = ErrorgapSpanCollector()
         do {
-            let value = try operation(collector)
+            let value = try withErrorgapTransaction(transactionId) { try operation(collector) }
             _ = notifyTransaction(ErrorgapTransaction(
+                id: transactionId,
                 kind: "job",
                 statusCode: 200,
                 durationMs: Date().timeIntervalSince(started) * 1_000,
@@ -125,10 +127,12 @@ public final class ErrorgapClient {
                     "source": "errorgap-swift job",
                     "component": "swift.job",
                     "action": jobClass,
+                    "transaction_id": transactionId,
                 ],
                 environment: ["queue": queue]
             ))
             _ = notifyTransaction(ErrorgapTransaction(
+                id: transactionId,
                 kind: "job",
                 statusCode: 500,
                 durationMs: Date().timeIntervalSince(started) * 1_000,
@@ -250,4 +254,17 @@ public final class ErrorgapClient {
         default: return 20
         }
     }
+}
+
+/// The transaction this error was raised in (`ErrorgapTransactionContext`),
+/// unless the caller set one, so errorgap links the two.
+private func withTransaction(_ options: NoticeOptions) -> NoticeOptions {
+    guard let id = ErrorgapTransactionContext.current,
+          options.context?["transaction_id"] == nil
+    else { return options }
+    var resolved = options
+    var context = options.context ?? [:]
+    context["transaction_id"] = id
+    resolved.context = context
+    return resolved
 }
