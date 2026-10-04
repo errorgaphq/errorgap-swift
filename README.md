@@ -17,7 +17,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.3.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.4.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
@@ -125,6 +125,32 @@ try Errorgap.trackJob("ReceiptJob", queue: "critical") { spans in
     try runReceiptJob()
 }
 ```
+
+### Link API calls to server traces
+
+Trace a call to your API and errorgap links it to the server request that
+answered it (when the server's errorgap SDK records the `x-errorgap-trace`
+header — Rails, Laravel, Express, Django, Spring and the rest do):
+
+```swift
+let spans = ErrorgapSpanCollector()
+let started = Date()
+let (data, _) = try await spans.traceCall("GET /api/orders/7") { headers in
+    var request = URLRequest(url: ordersURL)
+    headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+    return try await URLSession.shared.data(for: request)
+}
+Errorgap.notifyTransaction(ErrorgapTransaction(
+    path: "OrderScreen",
+    durationMs: Date().timeIntervalSince(started) * 1000,
+    spans: spans.snapshot()
+))
+```
+
+`traceCall` records an `http` span carrying the trace id it sent; the app's
+trace lists each traced call with a link to its server trace, and the server
+trace shows how long the app waited. For manual timing use
+`let call = spans.startCall(label)`, send `call.headers`, then `call.finish()`.
 
 ### Link errors to their transaction
 
