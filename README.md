@@ -17,7 +17,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.4.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.5.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
@@ -188,6 +188,52 @@ Errorgap.notifyLog(
 
 let logger = ErrorgapLogger(source: "CheckoutViewModel")
 logger.error("checkout failed")
+```
+
+## Session replay
+
+Session replay records a timeline of each app session, shown on error groups
+and incidents in Errorgap. It is **timeline only**: no screenshots and no view
+snapshots.
+
+| Event | Recorded when |
+|---|---|
+| `page_load` | The app starts ("App started"), or a new session starts after 30 minutes in the background ("App opened") |
+| `navigation` | A screen is tracked, or the app returns from the background |
+| `api_error` | A call you pass to `Errorgap.recordCall` failed or answered 5xx |
+| `error` | An error is reported, linked to its error group |
+| `exit` | The app goes to the background |
+
+It is on by default in iOS and tvOS apps (off on macOS and watchOS; pass
+`replay: true` to record there), and records only what the project allows in
+**Settings → Session replay**: nothing while replay is off, and a sampled share
+of sessions while it is on. Backgrounding is picked up automatically on iOS and
+tvOS; elsewhere call `Errorgap.appPaused()` / `Errorgap.appResumed()`.
+
+Record screens:
+
+```swift
+// SwiftUI
+CheckoutView().errorgapScreen("Checkout")
+
+// UIKit, e.g. in viewDidAppear
+Errorgap.trackScreen("Checkout")
+```
+
+Record failed API calls from your completion handlers:
+
+```swift
+URLSession.shared.dataTask(with: request) { data, response, error in
+    Errorgap.recordCall(request, response: response, error: error)
+    // ...
+}.resume()
+```
+
+Turn it off, or name the app in the session list:
+
+```swift
+Errorgap.initialize(config, replay: false)
+Errorgap.initialize(config, replayOptions: ErrorgapReplayOptions(appName: "Acme"))
 ```
 
 ## Configuration reference
