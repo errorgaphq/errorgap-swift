@@ -20,6 +20,13 @@ public final class ErrorgapClient {
     private var pendingTasks: Set<UUID> = []
     private let pendingLock = NSLock()
 
+    /// Session replay records each reported error, linked to its group: told
+    /// the error's label, it returns what to call with the group id.
+    var errorObserver: ((String) -> (String?) -> Void)?
+
+    /// The URLSession the SDK sends with (session replay shares it).
+    var urlSession: URLSession { session }
+
     public init(_ configuration: ErrorgapConfiguration, session: URLSession? = nil) {
         self.configuration = configuration
         if let session = session {
@@ -44,7 +51,16 @@ public final class ErrorgapClient {
         }
 
         let notice = Notice.build(error: error, config: configuration, options: withTransaction(options))
-        return submit(resource: "notices", payload: notice, sync: sync)
+        var observed: ((String?) -> Void)?
+        if let observer = errorObserver {
+            let first = (notice["errors"] as? [[String: Any]])?.first
+            let type = first?["type"] as? String ?? "Error"
+            let message = first?["message"] as? String ?? String(describing: error)
+            observed = observer("\(type): \(message)")
+        }
+        return submit(resource: "notices", payload: notice, sync: sync) { result in
+            observed?(groupId(of: result))
+        }
     }
 
     @discardableResult
@@ -161,15 +177,18 @@ public final class ErrorgapClient {
     private func submit(
         resource: String,
         payload: [String: Any],
-        sync: Bool
+        sync: Bool,
+        onDelivered: ((DeliveryResult) -> Void)? = nil
     ) -> DeliveryResult {
         guard let request = buildRequest(resource: resource, payload: payload) else {
             return DeliveryResult(status: nil, body: nil, error: ErrorgapError.encoding, queued: false)
         }
         if sync || !configuration.async {
-            return deliverSync(request)
+            let result = deliverSync(request)
+            onDelivered?(result)
+            return result
         }
-        guard deliverAsync(request) else {
+        guard deliverAsync(request, onDelivered: onDelivered) else {
             return DeliveryResult(status: nil, body: nil, error: ErrorgapError.queueFull, queued: false)
         }
         return DeliveryResult(status: 202, body: nil, error: nil, queued: true)
@@ -192,7 +211,7 @@ public final class ErrorgapClient {
         return result
     }
 
-    private func deliverAsync(_ request: URLRequest) -> Bool {
+    private func deliverAsync(_ request: URLRequest, onDelivered: ((DeliveryResult) -> Void)? = nil) -> Bool {
         let id = UUID()
         pendingLock.lock()
         guard pendingTasks.count < configuration.queueSize else {
@@ -202,7 +221,16 @@ public final class ErrorgapClient {
         pendingTasks.insert(id)
         pendingLock.unlock()
 
-        let task = session.dataTask(with: request) { [weak self] _, _, _ in
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            if let onDelivered {
+                let body = data.flatMap { String(data: $0, encoding: .utf8) }
+                onDelivered(DeliveryResult(
+                    status: (response as? HTTPURLResponse)?.statusCode,
+                    body: body,
+                    error: error,
+                    queued: false
+                ))
+            }
             self?.pendingLock.lock()
             self?.pendingTasks.remove(id)
             self?.pendingLock.unlock()
@@ -267,4 +295,12 @@ private func withTransaction(_ options: NoticeOptions) -> NoticeOptions {
     context["transaction_id"] = id
     resolved.context = context
     return resolved
+}
+
+/// The error group the notice response names, for session replay.
+private func groupId(of result: DeliveryResult) -> String? {
+    guard let body = result.body, let data = body.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return object["group_id"] as? String
 }

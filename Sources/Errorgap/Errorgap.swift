@@ -4,7 +4,13 @@ import Foundation
 // nonisolated(unsafe) lets us touch these from a C callback without
 // Sendable/MainActor friction; access from Swift is gated through stateLock.
 nonisolated(unsafe) private var sharedClient: ErrorgapClient?
+nonisolated(unsafe) private var sharedReplay: ErrorgapReplayRecorder?
+nonisolated(unsafe) private var lifecycleObservers: [NSObjectProtocol] = []
 private let stateLock = NSLock()
+
+/// UIKit's app lifecycle notifications, by name, so the SDK needn't import UIKit.
+private let didEnterBackground = Notification.Name("UIApplicationDidEnterBackgroundNotification")
+private let willEnterForeground = Notification.Name("UIApplicationWillEnterForegroundNotification")
 
 #if canImport(ObjectiveC)
 nonisolated(unsafe) private var previousHandler: (@convention(c) (NSException) -> Void)?
@@ -25,10 +31,43 @@ private let uncaughtTrampoline: @convention(c) (NSException) -> Void = { excepti
 #endif
 
 public enum Errorgap {
-    public static func initialize(_ configuration: ErrorgapConfiguration, captureGlobals: Bool = true) {
+    /// - Parameters:
+    ///   - replay: Session replay (a timeline of the app session, no
+    ///     screenshots). Defaults to on in iOS and tvOS apps; it records only
+    ///     what the project's replay settings allow (Settings → Session replay).
+    ///     `false` turns it off, `true` records on other platforms too.
+    public static func initialize(
+        _ configuration: ErrorgapConfiguration,
+        captureGlobals: Bool = true,
+        replay: Bool? = nil,
+        replayOptions: ErrorgapReplayOptions = ErrorgapReplayOptions()
+    ) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        sharedClient = ErrorgapClient(configuration)
+        let client = ErrorgapClient(configuration)
+        sharedClient = client
+        stopReplayLocked()
+        if replay ?? replayDefault, (try? configuration.validate()) != nil {
+            let recorder = ErrorgapReplayRecorder(
+                configuration: configuration,
+                session: client.urlSession,
+                options: replayOptions
+            )
+            sharedReplay = recorder
+            client.errorObserver = { [weak recorder] label in
+                recorder?.errorStarted(label) ?? { _ in }
+            }
+            let center = NotificationCenter.default
+            lifecycleObservers = [
+                center.addObserver(forName: didEnterBackground, object: nil, queue: nil) { _ in
+                    Errorgap.appPaused()
+                },
+                center.addObserver(forName: willEnterForeground, object: nil, queue: nil) { _ in
+                    Errorgap.appResumed()
+                },
+            ]
+            recorder.start()
+        }
         if captureGlobals {
             #if canImport(ObjectiveC)
             previousHandler = NSGetUncaughtExceptionHandler()
@@ -85,10 +124,60 @@ public enum Errorgap {
         sharedClient?.flush(timeout: timeout)
     }
 
+    // MARK: - Session replay
+
+    /// Record the screen now showing in the session replay timeline. In
+    /// SwiftUI, `.errorgapScreen("Checkout")` calls it when the view appears.
+    public static func trackScreen(_ name: String) {
+        currentReplay()?.screen(name)
+    }
+
+    /// The app went to the background. Called for you on iOS and tvOS; call
+    /// it yourself elsewhere.
+    public static func appPaused() {
+        currentReplay()?.paused()
+    }
+
+    /// The app is in the foreground again. Called for you on iOS and tvOS.
+    public static func appResumed() {
+        currentReplay()?.resumed()
+    }
+
+    /// Record an API call in the session replay timeline when it failed or
+    /// answered 5xx. Call it from your URLSession completion handlers.
+    public static func recordCall(_ request: URLRequest, response: URLResponse?, error: Error?) {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard error != nil || status == 0 || status >= 500 else { return }
+        currentReplay()?.apiError(method: request.httpMethod ?? "GET", url: request.url, status: status)
+    }
+
+    private static var replayDefault: Bool {
+        #if os(iOS) || os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private static func currentReplay() -> ErrorgapReplayRecorder? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return sharedReplay
+    }
+
+    /// Called with `stateLock` held.
+    private static func stopReplayLocked() {
+        sharedReplay?.stop()
+        sharedReplay = nil
+        for observer in lifecycleObservers { NotificationCenter.default.removeObserver(observer) }
+        lifecycleObservers = []
+    }
+
     // For tests: reset the singleton.
     static func reset() {
         stateLock.lock()
         defer { stateLock.unlock() }
         sharedClient = nil
+        stopReplayLocked()
     }
 }
