@@ -17,7 +17,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.5.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.6.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
@@ -209,6 +209,11 @@ It is on by default in iOS and tvOS apps (off on macOS and watchOS; pass
 **Settings → Session replay**: nothing while replay is off, and a sampled share
 of sessions while it is on. Backgrounding is picked up automatically on iOS and
 tvOS; elsewhere call `Errorgap.appPaused()` / `Errorgap.appResumed()`.
+
+Only sessions that hit an error are kept. Until an error is reported, the
+session's most recent 300 events are held in memory and nothing is sent; then
+everything held goes up with the error and the rest of the session follows. A
+session that ends without an error is never sent.
 
 Record screens:
 

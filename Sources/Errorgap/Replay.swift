@@ -27,6 +27,8 @@ public struct ErrorgapReplayOptions {
 public let errorgapReplayBackgroundTimeout: TimeInterval = 30 * 60
 let errorgapReplayMaxBatchEvents = 200
 private let maxBufferedEvents = 1000
+/// Before the session's first error, only the most recent events are held.
+let errorgapReplayMaxPendingEvents = 300
 private let maxLabel = 200
 
 /// Records a session replay timeline: app start, screens, failed API calls,
@@ -152,11 +154,14 @@ final class ErrorgapReplayRecorder {
         push(type: "api_error", label: "\(method.uppercased()) \(shown) → \(status == 0 ? "failed" : String(status))")
     }
 
+    /// Sends what is recorded, once the session has an error. Only sessions
+    /// that hit an error are kept: until then events are held and nothing is
+    /// sent, and a session that ends without one is never sent.
     func flush(final: Bool) {
         var last = final
         while true {
             let batch: [String: Any]? = locked {
-                guard state == .recording else { return nil }
+                guard state == .recording, hadError else { return nil }
                 let take = Array(events.prefix(errorgapReplayMaxBatchEvents))
                 events.removeFirst(take.count)
                 if take.isEmpty && !last { return nil }
@@ -238,7 +243,10 @@ final class ErrorgapReplayRecorder {
 
     private func push(type: String, label: String, t: Int? = nil, groupId: String? = nil) {
         locked {
-            guard state == .pending || state == .recording, events.count < maxBufferedEvents else { return }
+            guard state == .pending || state == .recording else { return }
+            // Before an error, the recent past matters most: drop the oldest.
+            if !hadError && events.count >= errorgapReplayMaxPendingEvents { events.removeFirst() }
+            guard events.count < maxBufferedEvents else { return }
             var event: [String: Any] = [
                 "t": t ?? offset(),
                 "type": type,
