@@ -138,7 +138,7 @@ struct ReplayTests {
         ReplayServerProtocol.reset()
         let r = recorder()
         r.start()
-        settle { r.recording && !ReplayServerProtocol.sessionBatches().isEmpty }
+        settle { r.recording }
 
         r.screen("Checkout")
         r.screen("Checkout")
@@ -165,6 +165,7 @@ struct ReplayTests {
         let r = recorder()
         r.start()
         settle { r.recording }
+        r.errorStarted("Error: boom")(nil)
         r.paused()
         r.resumed()
         r.screen("Home")
@@ -181,9 +182,37 @@ struct ReplayTests {
         ReplayServerProtocol.reset(sessionStatus: 204)
         let r = recorder()
         r.start()
+        settle { r.recording }
+        r.errorStarted("Error: boom")(nil)
         settle { !ReplayServerProtocol.sessionBatches().isEmpty }
         settle { !r.recording }
         #expect(!r.recording)
+    }
+
+    @Test func sendsNothingForASessionWithoutAnError() {
+        ReplayServerProtocol.reset()
+        let r = recorder()
+        r.start()
+        settle { r.recording }
+        r.screen("Checkout")
+        r.paused()
+        settle()
+        #expect(ReplayServerProtocol.sessionBatches().isEmpty)
+    }
+
+    @Test func holdsOnlyTheMostRecentEventsBeforeAnError() {
+        ReplayServerProtocol.reset()
+        let r = recorder()
+        r.start()
+        settle { r.recording }
+        for i in 0..<(errorgapReplayMaxPendingEvents + 20) { r.screen("Screen \(i)") }
+        r.errorStarted("Error: boom")(nil)
+        settle { self.labels().contains { $0.hasPrefix("error:") } }
+
+        let before = labels().filter { !$0.hasPrefix("error:") }
+        #expect(before.count == errorgapReplayMaxPendingEvents)
+        // "App started" plus 320 screens: the oldest 21 are dropped.
+        #expect(before.first == "navigation:Opened Screen 20")
     }
 
     @Test func clientReportsErrorsToTheObserverWithTheirGroup() {
