@@ -153,3 +153,46 @@ struct HardeningTests {
         #expect(stored() == 0)
     }
 }
+
+// In the same (serialized) suite: these share the stub's state.
+#if canImport(Darwin)
+extension HardeningTests {
+    @Test func aStoredSignalCrashBecomesANoticeOnTheNextLaunch() throws {
+        StubProtocol.reset()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("errorgap-\(UUID().uuidString)")
+        let folder = directory.appendingPathComponent("errorgap-crashes")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // What the signal handler leaves behind, and an empty file from a launch that ended normally.
+        try """
+        signal 11
+        0   Errorgap                            0x0000000100a1b2c4 handleFatalSignal + 80
+        1   libsystem_platform.dylib            0x000000018e3d2a24 _sigtramp + 56
+        2   MyApp                               0x0000000100003f20 $s5MyApp9loadOrderyyF + 32
+        3   MyApp                               0x0000000100003e10 main + 12
+        """.write(to: folder.appendingPathComponent("signal-previous.txt"), atomically: true, encoding: .utf8)
+        try "".write(to: folder.appendingPathComponent("signal-clean-exit.txt"), atomically: true, encoding: .utf8)
+
+        let client = ErrorgapClient(
+            ErrorgapConfiguration(endpoint: "https://errorgap.example.com", projectSlug: "demo", async: false, crashDirectory: directory.path),
+            session: StubProtocol.session()
+        )
+        #expect(client.sendStoredCrashes() == 1)
+
+        let body = try #require(StubProtocol.received.first)
+        let notice = try #require(try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        let error = try #require((notice["errors"] as? [[String: Any]])?.first)
+        #expect(error["type"] as? String == "SIGSEGV")
+        #expect((notice["context"] as? [String: Any])?["source"] as? String == "signal")
+        let frames = try #require(error["backtrace"] as? [[String: Any]])
+        #expect(frames.count == 2) // the handler and the trampoline are left out
+        #expect(body.contains("MyApp.loadOrder()"))
+        #expect(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).isEmpty)
+    }
+
+    @Test func parsingIgnoresAFileWithNoSignal() {
+        #expect(SignalCrashes.parse("") == nil)
+        #expect(SignalCrashes.parse("garbage") == nil)
+        #expect(SignalCrashes.parse("signal 6\n")?.signal == 6)
+    }
+}
+#endif

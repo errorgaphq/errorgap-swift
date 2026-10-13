@@ -72,11 +72,20 @@ Errorgap.initialize(ErrorgapConfiguration(
 ))
 ```
 
-With `crashDirectory` set, an uncaught `NSException` is written to disk before
-it is sent and removed once the server has it, so a crash that ends the app
-before the request finishes goes out on the next launch. Swift runtime traps
-and signals (`fatalError`, force-unwrapping `nil`, bad memory access) are not
-captured.
+With `crashDirectory` set (Apple platforms):
+
+- an uncaught `NSException` is written to disk before it is sent and removed
+  once the server has it, so a crash that ends the app before the request
+  finishes goes out on the next launch;
+- fatal signals are captured too: memory faults (`SIGSEGV`, `SIGBUS`), aborts,
+  and the traps the Swift runtime raises for `fatalError`, a force-unwrapped
+  `nil`, an out-of-range index or an arithmetic overflow. Nothing can be sent
+  from inside a signal handler, so the handler saves the stack and the next
+  launch reports it as `SIGTRAP`, `SIGSEGV`, … with demangled Swift symbols.
+
+Frames carry symbol names, not file and line: symbolication with dSYMs is not supported
+yet. A stack overflow is not recorded. Another crash reporter's signal
+handlers, if installed first, still run after errorgap's.
 
 `filterKeys` are masked at any depth in `params` and `session`, inside arrays
 too. After a 429 the SDK stops sending for the server's `Retry-After`

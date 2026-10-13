@@ -74,6 +74,9 @@ public enum Errorgap {
             previousHandler = NSGetUncaughtExceptionHandler()
             NSSetUncaughtExceptionHandler(uncaughtTrampoline)
             #endif
+            // Fatal signals and Swift runtime traps, reported on the next
+            // launch (needs `crashDirectory`).
+            client.captureSignals()
         }
         // Crashes the last launch could not deliver.
         if configuration.crashDirectory != nil, let client = sharedClient {

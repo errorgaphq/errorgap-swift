@@ -176,6 +176,19 @@ public final class ErrorgapClient {
 
     // MARK: - Crashes
 
+    /// This launch's signal file: not to be read back while it is in use.
+    private var activeSignalFile: String?
+
+    /// Start recording fatal signals (memory faults, `fatalError`, a
+    /// force-unwrapped `nil`) into `crashDirectory`, to be reported on the
+    /// next launch. Does nothing without `crashDirectory`.
+    func captureSignals() {
+        #if canImport(Darwin)
+        guard let folder = crashFolder else { return }
+        activeSignalFile = SignalCrashes.install(folder: folder)
+        #endif
+    }
+
     private var crashFolder: URL? {
         configuration.crashDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent("errorgap-crashes") }
     }
@@ -212,6 +225,29 @@ public final class ErrorgapClient {
               let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
         else { return 0 }
         var sent = 0
+        #if canImport(Darwin)
+        // Fatal signals: the handler could only save the stack; build the
+        // notice now. An empty file is a launch that ended normally.
+        for file in files where file.lastPathComponent.hasPrefix(SignalCrashes.filePrefix) {
+            if file.lastPathComponent == activeSignalFile { continue }
+            defer { try? FileManager.default.removeItem(at: file) }
+            guard let text = try? String(contentsOf: file, encoding: .utf8),
+                  let crash = SignalCrashes.parse(text)
+            else { continue }
+            let name = SignalCrashes.name(crash.signal)
+            let error = NSError(domain: "io.errorgap.signal", code: Int(crash.signal), userInfo: [
+                "callStackSymbols": crash.symbols,
+                NSLocalizedDescriptionKey: "The app was ended by \(name)",
+                Notice.typeKey: name,
+            ])
+            let result = notify(error, options: NoticeOptions(context: [
+                "source": "signal",
+                "signal": name,
+                "reported_on": "next launch",
+            ]), sync: true)
+            if result.success { sent += 1 }
+        }
+        #endif
         // Oldest first, and never more than a crash loop's worth.
         for file in files.filter({ $0.pathExtension == "json" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).suffix(10) {
             guard let body = try? Data(contentsOf: file), !body.isEmpty,

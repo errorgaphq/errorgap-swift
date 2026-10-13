@@ -24,6 +24,7 @@ public struct NoticeOptions {
 
 enum Notice {
     static let notifierId = "errorgap-swift"
+    static let typeKey = "io.errorgap.type"
 
     static func build(
         error: Error,
@@ -51,7 +52,9 @@ enum Notice {
             defaultEnvironment.merge(extraEnv) { _, new in new }
         }
 
-        let typeName = String(describing: type(of: error))
+        // A crash rebuilt from disk names its own type (`SIGSEGV`).
+        let typeName = ((error as NSError).userInfo[Notice.typeKey] as? String)
+            ?? String(describing: type(of: error))
         let message = errorMessage(error)
 
         let errorEntry: [String: Any] = [
