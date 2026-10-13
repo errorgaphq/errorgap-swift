@@ -17,7 +17,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.6.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.7.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
@@ -58,6 +58,29 @@ do {
 
 `notify` returns a `DeliveryResult` (`status`, `body`, `error`, `queued`).
 The SDK never throws.
+
+## Crashes, filtering and hooks
+
+```swift
+let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+
+Errorgap.initialize(ErrorgapConfiguration(
+    projectSlug: "my-app",
+    ignoreEnvironments: ["debug"],
+    beforeNotify: { notice in notice },   // return nil to drop a notice
+    crashDirectory: caches.path
+))
+```
+
+With `crashDirectory` set, an uncaught `NSException` is written to disk before
+it is sent and removed once the server has it, so a crash that ends the app
+before the request finishes goes out on the next launch. Swift runtime traps
+and signals (`fatalError`, force-unwrapping `nil`, bad memory access) are not
+captured.
+
+`filterKeys` are masked at any depth in `params` and `session`, inside arrays
+too. After a 429 the SDK stops sending for the server's `Retry-After`
+(`client.paused`).
 
 ## Source-aware errors
 

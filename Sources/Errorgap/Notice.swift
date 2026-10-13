@@ -70,7 +70,7 @@ enum Notice {
             "errors": [errorEntry],
             "context": defaultContext,
             "environment": defaultEnvironment,
-            "session": options.session ?? [:],
+            "session": Filter.params(options.session ?? [:], filterKeys: config.filterKeys),
             "params": Filter.params(options.params ?? [:], filterKeys: config.filterKeys),
         ]
         if let pid = config.projectId {

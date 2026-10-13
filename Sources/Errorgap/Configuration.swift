@@ -23,6 +23,18 @@ public struct ErrorgapConfiguration {
     public var logsEnabled: Bool
     public var minimumLogLevel: String
     public var deviceInfo: [String: Any]
+    /// Environments in which nothing is sent.
+    public var ignoreEnvironments: [String]
+    /// Sees each notice before it is sent and returns the notice to send,
+    /// changed or not, or `nil` to drop it.
+    public var beforeNotify: (([String: Any]) -> [String: Any]?)?
+    /// Where an uncaught exception is kept until it is delivered, so one
+    /// that ends the app before the request finishes is sent on the next
+    /// launch. For an app, a folder in the caches directory.
+    public var crashDirectory: String?
+
+    /// True when nothing should be sent from the configured environment.
+    public var ignoredEnvironment: Bool { ignoreEnvironments.contains(environment) }
 
     public init(
         endpoint: String? = nil,
@@ -41,8 +53,18 @@ public struct ErrorgapConfiguration {
         apmSampleRate: Double? = nil,
         logsEnabled: Bool? = nil,
         minimumLogLevel: String? = nil,
-        deviceInfo: [String: Any] = [:]
+        deviceInfo: [String: Any] = [:],
+        ignoreEnvironments: [String]? = nil,
+        beforeNotify: (([String: Any]) -> [String: Any]?)? = nil,
+        crashDirectory: String? = nil
     ) {
+        self.ignoreEnvironments = ignoreEnvironments
+            ?? (ProcessInfo.processInfo.environment["ERRORGAP_IGNORE_ENVIRONMENTS"] ?? "")
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        self.beforeNotify = beforeNotify
+        self.crashDirectory = crashDirectory
         self.endpoint = endpoint
             ?? ProcessInfo.processInfo.environment["ERRORGAP_ENDPOINT"]
             ?? "http://127.0.0.1:3030"
@@ -110,6 +132,8 @@ public enum ErrorgapError: Error, Equatable {
     case missingEndpoint
     case notInitialized
     case queueFull
+    /// Not sent: the server asked for a pause (`Retry-After`) that has not passed yet.
+    case rateLimited
     case encoding
     case invalidTimeout
     case invalidQueueSize
