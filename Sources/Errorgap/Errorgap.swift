@@ -20,10 +20,11 @@ private let uncaughtTrampoline: @convention(c) (NSException) -> Void = { excepti
         NSLocalizedDescriptionKey: exception.reason ?? exception.name.rawValue,
     ]
     let nsError = NSError(domain: "io.errorgap.uncaught", code: 0, userInfo: userInfo)
-    _ = sharedClient?.notify(nsError, options: NoticeOptions(context: [
+    // Stored first, removed once delivered: see ErrorgapClient.notifyCrash.
+    _ = sharedClient?.notifyCrash(nsError, options: NoticeOptions(context: [
         "source": "NSSetUncaughtExceptionHandler",
         "exception_name": exception.name.rawValue,
-    ]), sync: true)
+    ]))
     if let prev = previousHandler {
         prev(exception)
     }
@@ -73,6 +74,13 @@ public enum Errorgap {
             previousHandler = NSGetUncaughtExceptionHandler()
             NSSetUncaughtExceptionHandler(uncaughtTrampoline)
             #endif
+            // Fatal signals and Swift runtime traps, reported on the next
+            // launch (needs `crashDirectory`).
+            client.captureSignals()
+        }
+        // Crashes the last launch could not deliver.
+        if configuration.crashDirectory != nil, let client = sharedClient {
+            DispatchQueue.global(qos: .utility).async { client.sendStoredCrashes() }
         }
     }
 

@@ -50,7 +50,12 @@ public final class ErrorgapClient {
             return DeliveryResult(status: nil, body: nil, error: error, queued: false)
         }
 
-        let notice = Notice.build(error: error, config: configuration, options: withTransaction(options))
+        if configuration.ignoredEnvironment {
+            return DeliveryResult(status: 202, body: "ignored environment", error: nil, queued: false)
+        }
+        guard let notice = prepare(error, options: options) else {
+            return DeliveryResult(status: 202, body: "dropped by beforeNotify", error: nil, queued: false)
+        }
         var observed: ((String?) -> Void)?
         if let observer = errorObserver {
             let first = (notice["errors"] as? [[String: Any]])?.first
@@ -161,6 +166,203 @@ public final class ErrorgapClient {
         }
     }
 
+    /// The notice for `error` after `beforeNotify`, or nil when the hook
+    /// dropped it.
+    private func prepare(_ error: Error, options: NoticeOptions) -> [String: Any]? {
+        let notice = Notice.build(error: error, config: configuration, options: withTransaction(options))
+        guard let hook = configuration.beforeNotify else { return notice }
+        return hook(notice)
+    }
+
+    // MARK: - Crashes
+
+    /// This launch's signal file: not to be read back while it is in use.
+    private var activeSignalFile: String?
+
+    /// Start recording fatal signals (memory faults, `fatalError`, a
+    /// force-unwrapped `nil`) into `crashDirectory`, to be reported on the
+    /// next launch. Does nothing without `crashDirectory`.
+    func captureSignals() {
+        #if canImport(Darwin)
+        guard let folder = crashFolder else { return }
+        activeSignalFile = SignalCrashes.install(folder: folder)
+        #endif
+    }
+
+    private var crashFolder: URL? {
+        configuration.crashDirectory.map { URL(fileURLWithPath: $0).appendingPathComponent("errorgap-crashes") }
+    }
+
+    /// Report an uncaught exception. The notice is written to
+    /// `crashDirectory` first and removed once the server has it, so if the
+    /// app is gone before the request finishes the next launch sends it.
+    @discardableResult
+    public func notifyCrash(_ error: Error, options: NoticeOptions = NoticeOptions()) -> DeliveryResult {
+        guard (try? configuration.validate()) != nil, !configuration.ignoredEnvironment else {
+            return DeliveryResult(status: 202, body: nil, error: nil, queued: false)
+        }
+        guard let notice = prepare(error, options: options),
+              let request = buildRequest(resource: "notices", payload: notice)
+        else {
+            return DeliveryResult(status: 202, body: "dropped by beforeNotify", error: nil, queued: false)
+        }
+        var stored: URL?
+        if let folder = crashFolder, let body = request.httpBody {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let file = folder.appendingPathComponent("crash-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString).json")
+            if (try? body.write(to: file, options: .atomic)) != nil { stored = file }
+        }
+        let result = deliverSync(request)
+        if let stored, Self.delivered(result) { try? FileManager.default.removeItem(at: stored) }
+        return result
+    }
+
+    /// Send the crashes the previous launch could not deliver. Returns how
+    /// many were sent.
+    @discardableResult
+    public func sendStoredCrashes() -> Int {
+        guard let folder = crashFolder,
+              let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        else { return 0 }
+        var sent = 0
+        #if canImport(Darwin)
+        // Fatal signals: the handler could only save the stack; build the
+        // notice now. An empty file is a launch that ended normally.
+        for file in files where file.lastPathComponent.hasPrefix(SignalCrashes.filePrefix) {
+            if file.lastPathComponent == activeSignalFile { continue }
+            defer { try? FileManager.default.removeItem(at: file) }
+            guard let text = try? String(contentsOf: file, encoding: .utf8),
+                  let crash = SignalCrashes.parse(text)
+            else { continue }
+            let name = SignalCrashes.name(crash.signal)
+            let error = NSError(domain: "io.errorgap.signal", code: Int(crash.signal), userInfo: [
+                "callStackSymbols": crash.symbols,
+                NSLocalizedDescriptionKey: "The app was ended by \(name)",
+                Notice.typeKey: name,
+            ])
+            let result = notify(error, options: NoticeOptions(context: [
+                "source": "signal",
+                "signal": name,
+                "reported_on": "next launch",
+            ]), sync: true)
+            if result.success { sent += 1 }
+        }
+        #endif
+        // Oldest first, and never more than a crash loop's worth.
+        for file in files.filter({ $0.pathExtension == "json" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).suffix(10) {
+            guard let body = try? Data(contentsOf: file), !body.isEmpty,
+                  var request = buildRequest(resource: "notices", payload: [:])
+            else {
+                try? FileManager.default.removeItem(at: file)
+                continue
+            }
+            request.httpBody = body
+            guard Self.delivered(deliverSync(request)) else { break }
+            try? FileManager.default.removeItem(at: file)
+            sent += 1
+        }
+        return sent
+    }
+
+    /// The server has it, or refused it for good: either way do not keep it.
+    private static func delivered(_ result: DeliveryResult) -> Bool {
+        guard let status = result.status else { return false }
+        return status < 500 && status != 429
+    }
+
+    // MARK: - Remote settings
+
+    // The project's remote settings (Project settings › What SDKs send in
+    // errorgap): errors, performance data or logs can be switched off there
+    // and installed apps follow within a poll interval, with no new release.
+    // Until the first answer, and whenever errorgap cannot be reached,
+    // everything stays on.
+    private var remoteOff: Set<String> = []
+    private var remoteInterval: TimeInterval = 600
+    private var remotePolling = false
+    private static let remoteFields = ["notices": "errors_enabled", "transactions": "apm_enabled", "logs": "logs_enabled"]
+
+    /// False only when errorgap has said to stop sending this kind of payload.
+    func remoteEnabled(_ resource: String) -> Bool {
+        guard configuration.remoteSettings, let field = Self.remoteFields[resource] else { return true }
+        pendingLock.lock()
+        let start = !remotePolling
+        remotePolling = true
+        let enabled = !remoteOff.contains(field)
+        pendingLock.unlock()
+        if start { pollRemoteSettings() }
+        return enabled
+    }
+
+    private func pollRemoteSettings() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            self.refreshRemoteSettings()
+            self.pendingLock.lock()
+            let interval = self.remoteInterval
+            self.pendingLock.unlock()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + interval) { [weak self] in
+                self?.pollRemoteSettings()
+            }
+        }
+    }
+
+    /// Fetch the project's remote settings now. Returns whether they could
+    /// be read; a failure leaves the last known settings in place.
+    @discardableResult
+    public func refreshRemoteSettings() -> Bool {
+        let trimmed = configuration.endpoint.hasSuffix("/") ? String(configuration.endpoint.dropLast()) : configuration.endpoint
+        guard let slug = configuration.projectSlug,
+              let url = URL(string: "\(trimmed)/api/projects/\(slug)/config")
+        else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("errorgap-swift/\(ErrorgapVersion.current)", forHTTPHeaderField: "user-agent")
+        if let key = configuration.apiKey, !key.isEmpty {
+            request.setValue(key, forHTTPHeaderField: "x-errorgap-project-key")
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var read = false
+        let task = session.dataTask(with: request) { [weak self] data, response, _ in
+            defer { semaphore.signal() }
+            guard let self, (response as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            // An absent field means on.
+            let off = Set(Self.remoteFields.values.filter { (body[$0] as? Bool) == false })
+            let seconds = (body["poll_interval_seconds"] as? NSNumber)?.doubleValue ?? 0
+            self.pendingLock.lock()
+            self.remoteOff = off
+            self.remoteInterval = seconds >= 60 ? seconds : 600
+            self.pendingLock.unlock()
+            read = true
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + configuration.timeout + 1)
+        return read
+    }
+
+    // MARK: - Rate limiting
+
+    private var pausedUntil = Date.distantPast
+
+    /// True while delivery is paused at the server's request (a 429 or 503
+    /// with `Retry-After`).
+    public var paused: Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return Date() < pausedUntil
+    }
+
+    private func pauseIfLimited(_ response: URLResponse?) {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 429 || http.statusCode == 503 else { return }
+        let header = http.value(forHTTPHeaderField: "Retry-After") ?? ""
+        let seconds = min(max(Double(header.trimmingCharacters(in: .whitespaces)) ?? 60, 1), 300)
+        pendingLock.lock()
+        pausedUntil = Date().addingTimeInterval(seconds)
+        pendingLock.unlock()
+    }
+
     public func flush(timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
@@ -180,6 +382,9 @@ public final class ErrorgapClient {
         sync: Bool,
         onDelivered: ((DeliveryResult) -> Void)? = nil
     ) -> DeliveryResult {
+        if configuration.ignoredEnvironment || !remoteEnabled(resource) {
+            return DeliveryResult(status: 204, body: "switched off for this project", error: nil, queued: false)
+        }
         guard let request = buildRequest(resource: resource, payload: payload) else {
             return DeliveryResult(status: nil, body: nil, error: ErrorgapError.encoding, queued: false)
         }
@@ -195,9 +400,13 @@ public final class ErrorgapClient {
     }
 
     private func deliverSync(_ request: URLRequest) -> DeliveryResult {
+        if paused {
+            return DeliveryResult(status: nil, body: nil, error: ErrorgapError.rateLimited, queued: false)
+        }
         let semaphore = DispatchSemaphore(value: 0)
         var result = DeliveryResult(status: nil, body: nil, error: nil, queued: false)
-        let task = session.dataTask(with: request) { data, response, error in
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            self?.pauseIfLimited(response)
             if let error = error {
                 result = DeliveryResult(status: nil, body: nil, error: error, queued: false)
             } else if let http = response as? HTTPURLResponse {
@@ -212,6 +421,10 @@ public final class ErrorgapClient {
     }
 
     private func deliverAsync(_ request: URLRequest, onDelivered: ((DeliveryResult) -> Void)? = nil) -> Bool {
+        if paused {
+            onDelivered?(DeliveryResult(status: nil, body: nil, error: ErrorgapError.rateLimited, queued: false))
+            return true
+        }
         let id = UUID()
         pendingLock.lock()
         guard pendingTasks.count < configuration.queueSize else {
@@ -222,6 +435,7 @@ public final class ErrorgapClient {
         pendingLock.unlock()
 
         let task = session.dataTask(with: request) { [weak self] data, response, error in
+            self?.pauseIfLimited(response)
             if let onDelivered {
                 let body = data.flatMap { String(data: $0, encoding: .utf8) }
                 onDelivered(DeliveryResult(

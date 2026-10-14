@@ -17,7 +17,7 @@ Requires Swift 5.9+, iOS 14+, macOS 11+, watchOS 7+, tvOS 14+.
 Swift Package Manager. In `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.6.0")
+.package(url: "https://github.com/errorgaphq/errorgap-swift.git", from: "0.7.0")
 ```
 
 …and add `"Errorgap"` to your target's dependencies.
@@ -58,6 +58,45 @@ do {
 
 `notify` returns a `DeliveryResult` (`status`, `body`, `error`, `queued`).
 The SDK never throws.
+
+## Remote settings
+
+Errors, performance data and logs can each be switched off for a project in
+errorgap (Project settings › What SDKs send). Installed apps follow within ten
+minutes of running, with no new release. If errorgap cannot be reached,
+everything stays on. `remoteSettings: false` ignores the project's switches.
+
+## Crashes, filtering and hooks
+
+```swift
+let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+
+Errorgap.initialize(ErrorgapConfiguration(
+    projectSlug: "my-app",
+    ignoreEnvironments: ["debug"],
+    beforeNotify: { notice in notice },   // return nil to drop a notice
+    crashDirectory: caches.path
+))
+```
+
+With `crashDirectory` set (Apple platforms):
+
+- an uncaught `NSException` is written to disk before it is sent and removed
+  once the server has it, so a crash that ends the app before the request
+  finishes goes out on the next launch;
+- fatal signals are captured too: memory faults (`SIGSEGV`, `SIGBUS`), aborts,
+  and the traps the Swift runtime raises for `fatalError`, a force-unwrapped
+  `nil`, an out-of-range index or an arithmetic overflow. Nothing can be sent
+  from inside a signal handler, so the handler saves the stack and the next
+  launch reports it as `SIGTRAP`, `SIGSEGV`, … with demangled Swift symbols.
+
+Frames carry symbol names, not file and line: symbolication with dSYMs is not supported
+yet. A stack overflow is not recorded. Another crash reporter's signal
+handlers, if installed first, still run after errorgap's.
+
+`filterKeys` are masked at any depth in `params` and `session`, inside arrays
+too. After a 429 the SDK stops sending for the server's `Retry-After`
+(`client.paused`).
 
 ## Source-aware errors
 
