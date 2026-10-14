@@ -39,6 +39,14 @@ final class FakeIngestorProtocol: URLProtocol {
     override func stopLoading() {}
 
     override func startLoading() {
+        // The SDK's settings poll is not an ingest request: no settings
+        // here, and nothing recorded.
+        if request.httpMethod == "GET" {
+            let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let body = request.httpBody
             ?? request.httpBodyStream.flatMap { Self.read($0) }
         var headers: [String: String] = [:]

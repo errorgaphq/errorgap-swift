@@ -270,6 +270,78 @@ public final class ErrorgapClient {
         return status < 500 && status != 429
     }
 
+    // MARK: - Remote settings
+
+    // The project's remote settings (Project settings › What SDKs send in
+    // errorgap): errors, performance data or logs can be switched off there
+    // and installed apps follow within a poll interval, with no new release.
+    // Until the first answer, and whenever errorgap cannot be reached,
+    // everything stays on.
+    private var remoteOff: Set<String> = []
+    private var remoteInterval: TimeInterval = 600
+    private var remotePolling = false
+    private static let remoteFields = ["notices": "errors_enabled", "transactions": "apm_enabled", "logs": "logs_enabled"]
+
+    /// False only when errorgap has said to stop sending this kind of payload.
+    func remoteEnabled(_ resource: String) -> Bool {
+        guard configuration.remoteSettings, let field = Self.remoteFields[resource] else { return true }
+        pendingLock.lock()
+        let start = !remotePolling
+        remotePolling = true
+        let enabled = !remoteOff.contains(field)
+        pendingLock.unlock()
+        if start { pollRemoteSettings() }
+        return enabled
+    }
+
+    private func pollRemoteSettings() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            self.refreshRemoteSettings()
+            self.pendingLock.lock()
+            let interval = self.remoteInterval
+            self.pendingLock.unlock()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + interval) { [weak self] in
+                self?.pollRemoteSettings()
+            }
+        }
+    }
+
+    /// Fetch the project's remote settings now. Returns whether they could
+    /// be read; a failure leaves the last known settings in place.
+    @discardableResult
+    public func refreshRemoteSettings() -> Bool {
+        let trimmed = configuration.endpoint.hasSuffix("/") ? String(configuration.endpoint.dropLast()) : configuration.endpoint
+        guard let slug = configuration.projectSlug,
+              let url = URL(string: "\(trimmed)/api/projects/\(slug)/config")
+        else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("errorgap-swift/\(ErrorgapVersion.current)", forHTTPHeaderField: "user-agent")
+        if let key = configuration.apiKey, !key.isEmpty {
+            request.setValue(key, forHTTPHeaderField: "x-errorgap-project-key")
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var read = false
+        let task = session.dataTask(with: request) { [weak self] data, response, _ in
+            defer { semaphore.signal() }
+            guard let self, (response as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            // An absent field means on.
+            let off = Set(Self.remoteFields.values.filter { (body[$0] as? Bool) == false })
+            let seconds = (body["poll_interval_seconds"] as? NSNumber)?.doubleValue ?? 0
+            self.pendingLock.lock()
+            self.remoteOff = off
+            self.remoteInterval = seconds >= 60 ? seconds : 600
+            self.pendingLock.unlock()
+            read = true
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + configuration.timeout + 1)
+        return read
+    }
+
     // MARK: - Rate limiting
 
     private var pausedUntil = Date.distantPast
@@ -310,8 +382,8 @@ public final class ErrorgapClient {
         sync: Bool,
         onDelivered: ((DeliveryResult) -> Void)? = nil
     ) -> DeliveryResult {
-        if configuration.ignoredEnvironment {
-            return DeliveryResult(status: 204, body: nil, error: nil, queued: false)
+        if configuration.ignoredEnvironment || !remoteEnabled(resource) {
+            return DeliveryResult(status: 204, body: "switched off for this project", error: nil, queued: false)
         }
         guard let request = buildRequest(resource: resource, payload: payload) else {
             return DeliveryResult(status: nil, body: nil, error: ErrorgapError.encoding, queued: false)

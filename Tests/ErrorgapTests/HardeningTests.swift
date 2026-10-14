@@ -11,12 +11,14 @@ import FoundationNetworking
 final class StubProtocol: URLProtocol {
     nonisolated(unsafe) static var status = 201
     nonisolated(unsafe) static var bodies: [String] = []
+    nonisolated(unsafe) static var settings: String?
     nonisolated(unsafe) static let lock = NSLock()
 
     static func reset(status: Int = 201) {
         lock.lock()
         self.status = status
         bodies = []
+        settings = nil
         lock.unlock()
     }
 
@@ -37,6 +39,17 @@ final class StubProtocol: URLProtocol {
     override func stopLoading() {}
 
     override func startLoading() {
+        // The settings poll: answered from `settings` (404 when unset), not recorded.
+        if request.httpMethod == "GET" {
+            Self.lock.lock()
+            let settings = Self.settings
+            Self.lock.unlock()
+            let response = HTTPURLResponse(url: request.url!, statusCode: settings == nil ? 404 : 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if let settings { client?.urlProtocol(self, didLoad: Data(settings.utf8)) }
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         var data = request.httpBody ?? Data()
         if data.isEmpty, let stream = request.httpBodyStream {
             stream.open()
@@ -105,6 +118,23 @@ struct HardeningTests {
         #expect(changed.success)
         #expect(StubProtocol.received.count == 1)
         #expect(StubProtocol.received[0].contains("billing"))
+    }
+
+    @Test func aKindSwitchedOffInErrorgapIsNotSent() {
+        StubProtocol.reset()
+        StubProtocol.lock.lock()
+        StubProtocol.settings = #"{"errors_enabled":false,"apm_enabled":true,"poll_interval_seconds":600}"#
+        StubProtocol.lock.unlock()
+        let sdk = client()
+        #expect(sdk.refreshRemoteSettings())
+        #expect(sdk.notify(error("x")).body == "switched off for this project")
+        #expect(StubProtocol.received.isEmpty)
+        #expect(sdk.remoteEnabled("transactions"))
+
+        // Unreadable settings keep what was known; with none, everything is on.
+        StubProtocol.reset()
+        #expect(!client().refreshRemoteSettings())
+        #expect(client().notify(error("y")).success)
     }
 
     @Test func nothingIsSentInAnIgnoredEnvironment() {

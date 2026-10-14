@@ -32,6 +32,9 @@ public struct ErrorgapConfiguration {
     /// that ends the app before the request finishes is sent on the next
     /// launch. For an app, a folder in the caches directory.
     public var crashDirectory: String?
+    /// Follow the project's settings in errorgap (Project settings › What SDKs
+    /// send): stop sending what is switched off there. On by default.
+    public var remoteSettings: Bool
 
     /// True when nothing should be sent from the configured environment.
     public var ignoredEnvironment: Bool { ignoreEnvironments.contains(environment) }
@@ -56,8 +59,11 @@ public struct ErrorgapConfiguration {
         deviceInfo: [String: Any] = [:],
         ignoreEnvironments: [String]? = nil,
         beforeNotify: (([String: Any]) -> [String: Any]?)? = nil,
-        crashDirectory: String? = nil
+        crashDirectory: String? = nil,
+        remoteSettings: Bool? = nil
     ) {
+        self.remoteSettings = remoteSettings
+            ?? (ProcessInfo.processInfo.environment["ERRORGAP_REMOTE_SETTINGS"]?.lowercased() != "false")
         self.ignoreEnvironments = ignoreEnvironments
             ?? (ProcessInfo.processInfo.environment["ERRORGAP_IGNORE_ENVIRONMENTS"] ?? "")
                 .split(separator: ",")

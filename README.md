@@ -59,6 +59,13 @@ do {
 `notify` returns a `DeliveryResult` (`status`, `body`, `error`, `queued`).
 The SDK never throws.
 
+## Remote settings
+
+Errors, performance data and logs can each be switched off for a project in
+errorgap (Project settings › What SDKs send). Installed apps follow within ten
+minutes of running, with no new release. If errorgap cannot be reached,
+everything stays on. `remoteSettings: false` ignores the project's switches.
+
 ## Crashes, filtering and hooks
 
 ```swift
